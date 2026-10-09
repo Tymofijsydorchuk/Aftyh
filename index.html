@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Камера — навчальне демо</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,-apple-system,sans-serif}body{max-width:760px;margin:28px auto;padding:0 16px}h1{font-size:1.6rem}.card{border:1px solid #8886;border-radius:14px;padding:16px;margin:14px 0}label{display:block;margin:10px 0 5px}input,select,button{font:inherit;padding:10px;border-radius:8px;max-width:100%}input{width: min(100%,420px);box-sizing:border-box}button{cursor:pointer;margin:6px 6px 6px 0}video{width:100%;max-height:440px;background:#111;border-radius:10px}#status{font-weight:600}.note{opacity:.85;font-size:.95rem}.danger{border-color:#c44}button:disabled{opacity:.5;cursor:not-allowed}
+</style>
+</head>
+<body>
+<h1>Навчальне демо: передавання камери через WebRTC</h1>
+<p class="note">Камера запускається лише після натискання кнопки та надання дозволу. Не використовуй це для запису чи трансляції без відома людини перед камерою.</p>
+<div class="card">
+<label for="role">Режим</label>
+<select id="role"><option value="sender">Я передаю свою камеру</option><option value="viewer">Я переглядаю трансляцію</option></select>
+<label for="room">Спільний код кімнати (4–32 символи)</label>
+<input id="room" value="demo-4821" autocomplete="off" spellcheck="false">
+<label for="server">Адреса signaling-сервера (WSS)</label>
+<input id="server" placeholder="wss://твій-сервер.example.com" autocomplete="url">
+<p class="note">Спершу розгорни server.js на хостингу, який підтримує Node.js і WebSocket через HTTPS/WSS. Не вводь секретні паролі в ці поля.</p>
+<button id="connect">Під'єднатися</button><button id="start" disabled>Увімкнути й передавати камеру</button><button id="stop" class="danger" disabled>Зупинити / від'єднатися</button>
+<p id="status" role="status">Не під'єднано.</p>
+</div>
+<div class="card"><h2>Попередній перегляд / відео</h2><video id="video" autoplay playsinline muted></video><p class="note" id="videoNote">Тут з'явиться локальний попередній перегляд або віддалене відео.</p></div>
+<div class="card"><h2>Як користуватися</h2><ol><li>Розгорни сервер із папки проєкту й отримай адресу WSS.</li><li>Обидва учасники введіть однаковий код кімнати та адресу сервера.</li><li>Друг вибирає «Я передаю свою камеру», натискає «Під'єднатися», потім «Увімкнути й передавати камеру» та дозволяє доступ.</li><li>Ти вибираєш «Я переглядаю трансляцію» й натискаєш «Під'єднатися».</li></ol><p class="note">Якщо пряме з'єднання не працює в певних мережах, може знадобитися TURN-сервер. Цей демопроєкт не містить TURN-сервера.</p></div>
+<script>
+const $ = id => document.getElementById(id);
+let ws = null, pc = null, localStream = null, role = 'sender', joined = false, pendingCandidates = [];
+const status = (s) => $('status').textContent = s;
+const setButtons = () => { $('connect').disabled = !!ws; $('start').disabled = !(joined && role === 'sender' && !localStream); $('stop').disabled = !ws && !localStream; };
+function send(type, data) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type, data})); }
+function makePeer() {
+  if (pc) pc.close();
+  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  pc.onicecandidate = e => { if (e.candidate) send('candidate', e.candidate); };
+  pc.ontrack = e => { $('video').srcObject = e.streams[0]; $('video').muted = false; $('videoNote').textContent = 'Віддалений відеопотік активний.'; };
+  pc.onconnectionstatechange = () => status('Стан відеозʼєднання: ' + pc.connectionState);
+  if (localStream) localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+}
+async function createOffer() {
+  if (!pc || role !== 'sender' || !localStream) return;
+  const offer = await pc.createOffer(); await pc.setLocalDescription(offer); send('offer', offer);
+  status('Камера увімкнена. Очікуємо підключення переглядача…');
+}
+$('connect').onclick = () => {
+  const server = $('server').value.trim(); const room = $('room').value.trim(); role = $('role').value;
+  if (!server.startsWith('wss://')) { status('Вкажи адресу захищеного WSS-сервера (wss://…).'); return; }
+  if (!/^[A-Za-z0-9-]{4,32}$/.test(room)) { status('Код кімнати має містити 4–32 літери, цифри або дефіси.'); return; }
+  try { ws = new WebSocket(server); } catch { status('Не вдалося відкрити WebSocket. Перевір адресу сервера.'); return; }
+  ws.onopen = () => { ws.send(JSON.stringify({type:'join', room, role})); status('Підʼєднання до кімнати…'); };
+  ws.onmessage = async event => {
+    const msg = JSON.parse(event.data);
+    try {
+      if (msg.type === 'error') { status('Помилка: ' + msg.message); return; }
+      if (msg.type === 'joined') { joined = true; status('У кімнаті. Очікуємо іншого учасника.'); setButtons(); if (role === 'viewer') makePeer(); }
+      if (msg.type === 'peer-joined') { status('Інший учасник приєднався.'); if (role === 'sender' && localStream) await createOffer(); }
+      if (msg.type === 'offer' && role === 'viewer') { if (!pc) makePeer(); await pc.setRemoteDescription(msg.data); for (const c of pendingCandidates) await pc.addIceCandidate(c); pendingCandidates=[]; const answer=await pc.createAnswer(); await pc.setLocalDescription(answer); send('answer', answer); }
+      if (msg.type === 'answer' && role === 'sender' && pc) { await pc.setRemoteDescription(msg.data); for (const c of pendingCandidates) await pc.addIceCandidate(c); pendingCandidates=[]; }
+      if (msg.type === 'candidate' && msg.data) { if (pc && pc.remoteDescription) await pc.addIceCandidate(msg.data); else pendingCandidates.push(msg.data); }
+      if (msg.type === 'peer-left') status('Інший учасник відʼєднався.');
+      if (msg.type === 'stop') status('Трансляцію зупинено.');
+    } catch (e) { status('Помилка WebRTC: ' + e.message); }
+    setButtons();
+  };
+  ws.onerror = () => status('Помилка зʼєднання із сервером.');
+  ws.onclose = () => { ws=null; joined=false; setButtons(); status('Зʼєднання із signaling-сервером закрито.'); };
+  setButtons();
+};
+$('start').onclick = async () => {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+    $('video').srcObject = localStream; $('video').muted = true; $('videoNote').textContent = 'Це твій локальний попередній перегляд.';
+    makePeer(); setButtons(); status('Камера активна. Відео буде передаватися учаснику в кімнаті.');
+    const room = $('room').value.trim();
+    // Re-notify peer with a fresh offer if they are already connected.
+    if (joined) { await createOffer(); }
+  } catch (e) { status('Камера недоступна або дозвіл не надано: ' + e.message); }
+};
+$('stop').onclick = () => {
+  send('stop');
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream=null; }
+  if (pc) { pc.close(); pc=null; }
+  if (ws) { ws.close(); ws=null; }
+  joined=false; pendingCandidates=[]; $('video').srcObject=null; $('videoNote').textContent='Відео зупинено.'; setButtons(); status('Зупинено.');
+};
+$('role').onchange = () => { if (!ws) { role=$('role').value; setButtons(); } };
+setButtons();
+</script>
+</body></html>

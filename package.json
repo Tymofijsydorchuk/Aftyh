@@ -1,0 +1,9 @@
+{
+  "name": "mac-camera-consent-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A consent-based WebRTC camera streaming learning demo",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}
